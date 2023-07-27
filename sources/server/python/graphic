@@ -1,0 +1,168 @@
+#!/usr/bin/python3
+
+import socket
+import asyncio
+import curses
+import queue
+
+
+class Client:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.setblocking(False)
+        self.loop = asyncio.get_event_loop()
+        self.loop.run_until_complete(self.connect())
+        self.buffer = ""
+
+    async def connect(self):
+        try:
+            await self.loop.sock_connect(self.s, (self.host, self.port))
+        except BlockingIOError:
+            await asyncio.sleep(1)
+            await self.connect()
+
+    async def reconnect(self):
+        self.s.close()
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.setblocking(False)
+        await self.connect()
+
+    async def send(self, data):
+        await self.loop.sock_sendall(self.s, data.encode("utf-8"))
+
+    async def receive(self):
+        while "\n" not in self.buffer:
+            try:
+                received_data = (await self.loop.sock_recv(self.s, 4096)).decode()
+                if len(received_data) == 0:
+                    raise Exception("Server disconnected")
+                self.buffer += received_data
+            except ConnectionError:
+                raise Exception("Server disconnected")
+        end_index = self.buffer.index("\n")
+        data = self.buffer[:end_index]
+        self.buffer = self.buffer[end_index + 1 :]
+        return data
+
+
+client = Client("127.0.0.1", 4242)
+outup_queue = queue.Queue()
+command_queue = queue.Queue()
+intup_queue = queue.Queue()
+
+
+class DisplayBox:
+    def __init__(self, stdscr, height, width, y, x):
+        self.text = []
+        self.win = stdscr.subwin(height, width, y, x)
+        self.win.border(0)
+        self.win.refresh()
+        self.board = []
+        self.sens = "^>v<"
+        self.players = {}
+        self.inv = "[ food %d, linemate %d, deraumere %d, sibur %d, mendiane %d, phiras %d, thystame %d ]"
+        self.plinv = {}
+        self.pllvl = {}
+        self.size = (0, 0)
+
+    async def send_commands(self):
+        while True:
+            while intup_queue.empty():
+                await asyncio.sleep(0.1)
+            cmd = intup_queue.get()
+            if cmd == "reset\n":
+                await client.reconnect()
+                continue
+            await client.send(cmd)
+
+    async def receive_data(self):
+        while True:
+            data = await client.receive()
+            if not data:
+                break
+            if not data.split()[0] in ["pin", "ppo", "pgt", "sbp"]:
+                command_queue.put(data)
+            data = data.strip().split(" ")
+            if data[0] == "msz":
+                self.size = (int(data[1]), int(data[2]))
+                outup_queue.put("update")
+            elif data[0] == "pnw":
+                self.players[data[1]] = [int(data[2]), int(data[3]), int(data[4])]
+                self.pllvl[data[1]] = int(data[5])
+                outup_queue.put("update")
+            elif data[0] == "ppo":
+                self.players[data[1]] = [int(data[2]), int(data[3]), int(data[4])]
+                outup_queue.put("update")
+            elif data[0] == "pin":
+                if self.plinv.get(data[1], "") != self.inv % tuple(map(int, data[4:])):
+                    self.plinv[data[1]] = self.inv % tuple(map(int, data[4:]))
+                    outup_queue.put("update")
+            elif data[0] == "pdi":
+                if data[1] in self.players:
+                    del self.players[data[1]]
+                if data[1] in self.plinv:
+                    del self.plinv[data[1]]
+                outup_queue.put("update")
+            elif data[0] == "plv":
+                self.pllvl[data[1]] = int(data[2])
+            for i in self.players:
+                intup_queue.put("pin %s\n" % i)
+
+    async def display_text(self):
+        while True:
+            while outup_queue.empty():
+                await asyncio.sleep(0.1)
+            outup_queue.get()
+            self.win.clear()
+            self.win.border(0)
+            board = [["#" for _ in range(self.size[0])] for _ in range(self.size[1])]
+            for player in self.players:
+                board[self.players[player][1]][self.players[player][0]] = self.sens[self.players[player][2] - 1]
+            for i in range(len(board)):
+                self.win.addstr(i + 1, 1, "".join(board[i]))
+            for i, player in enumerate(self.plinv):
+                self.win.addstr(len(board) + 1 + i, 1, f"{player} {self.pllvl.get(player, 0)} {self.plinv[player]}")
+            self.win.refresh()
+
+
+class DisplayText:
+    def __init__(self, stdscr, height, width, y, x):
+        self.text = []
+        self.win = stdscr.subwin(height, width, y, x)
+        self.win.border(0)
+        self.win.refresh()
+
+    async def display_text(self):
+        while True:
+            while command_queue.empty():
+                await asyncio.sleep(0.1)
+            self.text.append(f"<-- {command_queue.get().strip()}")
+            self.win.clear()
+            self.win.border(0)
+            for i, line in enumerate(self.text[-(self.win.getmaxyx()[0] - 2) :]):
+                self.win.addstr(i + 1, 1, line)
+            self.win.refresh()
+
+
+async def main(stdscr):
+    max_y, max_x = stdscr.getmaxyx()
+    display_box = DisplayBox(stdscr, max_y // 2, max_x, 0, 0)
+    display_text = DisplayText(stdscr, max_y // 2, max_x, max_y // 2, 0)
+
+    display1 = asyncio.create_task(display_box.display_text())
+    display2 = asyncio.create_task(display_text.display_text())
+    rcv = asyncio.create_task(display_box.receive_data())
+    snd = asyncio.create_task(display_box.send_commands())
+    intup_queue.put("GRAPHIC\n")
+    await asyncio.gather(rcv)
+
+
+def launch_client(stdscr):
+    loop.run_until_complete(main(stdscr))
+
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    curses.wrapper(launch_client)

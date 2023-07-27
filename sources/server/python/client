@@ -1,0 +1,125 @@
+#!/usr/bin/python3
+
+import socket
+import asyncio
+import curses
+import queue
+
+
+class Client:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.setblocking(False)
+        self.loop = asyncio.get_event_loop()
+        self.loop.run_until_complete(self.connect())
+
+    async def connect(self):
+        try:
+            await self.loop.sock_connect(self.s, (self.host, self.port))
+        except BlockingIOError:
+            await asyncio.sleep(1)
+            await self.connect()
+
+    async def reconnect(self):
+        self.s.close()
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.setblocking(False)
+        await self.connect()
+
+    async def send(self, data):
+        await self.loop.sock_sendall(self.s, data.encode("utf-8"))
+
+    async def receive(self):
+        return await self.loop.sock_recv(self.s, 1024)
+
+
+client = Client("127.0.0.1", 4242)
+outup_queue = queue.Queue()
+intup_queue = queue.Queue()
+
+
+class TextBox:
+    def __init__(self, stdscr, height, width, y, x):
+        self.win = stdscr.subwin(height, width, y, x)
+        self.win.border(0)
+        self.win.refresh()
+
+    async def send_commands(self):
+        while True:
+            while intup_queue.empty():
+                await asyncio.sleep(0.1)
+            cmd = intup_queue.get()
+            if cmd == "reset\n":
+                await client.reconnect()
+                continue
+            await client.send(cmd)
+
+    async def get_text(self):
+        while True:
+            curses.echo()
+            cmd = await loop.run_in_executor(None, self.win.getstr, 1, 1)
+            cmd = cmd.decode(encoding="utf-8")
+            if cmd == "exit":
+                break
+            cmd = cmd.replace("\\n", "\n")
+            if not cmd:
+                cmd = "\n"
+            # if cmd[-1] != "\n":
+            #     cmd += "\n"
+            outup_queue.put(f"--> {repr(cmd.encode('utf-8', 'replace'))[2:-1]}")
+            intup_queue.put(cmd)
+            self.win.clear()
+            self.win.border(0)
+            await asyncio.sleep(0.1)
+
+
+class DisplayBox:
+    def __init__(self, stdscr, height, width, y, x):
+        self.text = []
+        self.win = stdscr.subwin(height, width, y, x)
+        self.win.border(0)
+        self.win.refresh()
+
+    async def receive_data(self):
+        while True:
+            data = await client.receive()
+            if not data:
+                break
+            data = repr(data)[2:-1]
+            outup_queue.put(f"<-- {data}")
+
+    async def display_text(self):
+        while True:
+            while outup_queue.empty():
+                await asyncio.sleep(0.1)
+            self.text.append(outup_queue.get())
+            self.win.clear()
+            self.win.border(0)
+            for i, line in enumerate(self.text[-(self.win.getmaxyx()[0] - 2) :]):
+                self.win.addstr(i + 1, 1, line)
+            self.win.refresh()
+
+
+async def main(stdscr):
+    max_y, max_x = stdscr.getmaxyx()
+    text_box = TextBox(stdscr, 3, max_x - 2, max_y - 3, 1)
+    display_box = DisplayBox(stdscr, max_y - 4, max_x - 2, 0, 1)
+
+    display = asyncio.create_task(display_box.display_text())
+    rcv = asyncio.create_task(display_box.receive_data())
+
+    text = asyncio.create_task(text_box.get_text())
+    snd = asyncio.create_task(text_box.send_commands())
+
+    await asyncio.gather(text)
+
+
+def launch_client(stdscr):
+    loop.run_until_complete(main(stdscr))
+
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    curses.wrapper(launch_client)

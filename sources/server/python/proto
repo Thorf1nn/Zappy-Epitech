@@ -1,0 +1,64 @@
+#!/usr/bin/python3
+
+import os
+import re
+
+START = """/*
+** EPITECH PROJECT, 2023
+** server [WSL: Ubuntu]
+** File description:
+** prototype
+*/
+
+#ifndef PROTOTYPE_H_
+    #define PROTOTYPE_H_
+    #include "structs.h"
+    #include "define.h"
+"""
+
+END = "#endif /* !PROTOTYPE_H_ */"
+
+
+def get_defined_functions(filename):
+    with open(filename, "r") as file:
+        content = file.read()
+
+    pattern = r"\b\w+\s+\*?\*?\w+\([^;]+\)\s*{"
+    matches = re.findall(pattern, content)
+    functions = [match.strip("{") for match in matches]
+
+    return functions
+
+
+def process_directory(directory, fd):
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith(".c"):
+                filename = os.path.join(root, file)
+                defined_functions = get_defined_functions(filename)
+                if defined_functions:
+                    print(f"    // {filename.replace(f'{directory}/', '')}:", file=fd)
+                    for function in defined_functions:
+                        if len(function) + 4 > 80:
+                            func, params = function.split("(")
+                            # @todo fix case : int `*pass[2]` -> `int *` but should be `int *[2]`
+                            params = [param.replace("pass", "").strip() for param in map(str.strip, params.replace(")", "").split(","))]
+                            params = [param[: param.rindex(param.replace("*", "").split(" ")[-1])] if len(param.split(" ")) > 1 else param for param in params]
+                            print(f"    {func}({', '.join(map(str.strip,params))});", file=fd)
+                        else:
+                            print(f"    {function.strip()};", file=fd)
+                    print("", file=fd)
+
+
+def main():
+    # open include/prototype.h erase all content and run this script
+    fd = open("include/prototype.h", "w")
+    print(START, file=fd)
+    current_directory = os.getcwd()
+    process_directory(current_directory, fd)
+    print(END, file=fd)
+    fd.close()
+
+
+if __name__ == "__main__":
+    main()
